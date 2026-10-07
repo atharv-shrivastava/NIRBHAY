@@ -336,6 +336,12 @@ NIRBHAY/
 
 The UI should not contain domain logic directly. Keep risk calculation, anomaly classification, escalation rules, data access, and notification behavior in separable modules.
 
+## Walkthrough
+
+For a step-by-step guide to the employee journey, realtime anomaly/SOS demo, security verification flow, safe handoff, and production prototype boundaries, see [`docs/WALKTHROUGH.md`](./docs/WALKTHROUGH.md).
+
+**Live prototype:** https://nirbhay-six.vercel.app
+
 ## Technology Direction
 
 Recommended baseline:
