@@ -77,6 +77,7 @@ export function subscribeToLiveData(
   onJourney: (journey: Journey, eventType: "INSERT" | "UPDATE" | "DELETE") => void,
   onIncident: (incident: Incident, eventType: "INSERT" | "UPDATE" | "DELETE") => void,
   onEvent: () => void,
+  onStatus?: (status: string) => void,
 ): RealtimeChannel | null {
   if (!supabase) return null;
   const channel = supabase
@@ -90,7 +91,7 @@ export function subscribeToLiveData(
       else onIncident(mapIncident(payload.new as IncidentRow), payload.eventType as "INSERT" | "UPDATE");
     })
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "event_log" }, () => onEvent())
-    .subscribe();
+    .subscribe(status => onStatus?.(status));
   return channel;
 }
 
