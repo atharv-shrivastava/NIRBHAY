@@ -1,0 +1,5 @@
+{
+  "buildCommand": "corepack pnpm build",
+  "installCommand": "corepack enable && corepack pnpm install --no-frozen-lockfile",
+  "framework": "vite"
+}
