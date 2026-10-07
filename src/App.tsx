@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import MapView from "./MapView";
 import { demoIncident, demoJourney, demoJourneys, mutateJourney } from "./mock";
-import { supabase, supabaseConfigured } from "./lib/supabase";
+import { supabaseConfigured } from "./lib/supabase";
+import { loadLiveData, recordEvent, saveIncident, saveJourney, subscribeToLiveData, unsubscribe } from "./lib/realtime";
 import type { Incident, Journey, Role, Severity } from "./types";
 
 const employeePages = ["home", "journey", "risk", "safety", "profile", "history"];
@@ -146,11 +147,6 @@ function Supporting({ title }: { title: string }) {
   return <div className="page-stack"><PageTitle kicker="ENTERPRISE" title={title} text="Supporting NIRBHAY operations using shared journey, risk and incident data." /><div className="three-grid">{(items[title] ?? []).map((item,i)=><section className="card" key={item}><span className="eyebrow">{i===0 ? "VIEW" : "DEMO METRIC"}</span><h3>{item}</h3>{i>0 && <span className="demo-pill">DEMO DATA</span>}</section>)}</div></div>;
 }
 
-async function recordEvent(type: string, payload: Record<string, unknown>) {
-  if (!supabaseConfigured || !supabase) return;
-  await supabase.from("event_log").insert({ event_type: type, payload });
-}
-
 export default function App() {
   const [role, setRole] = useState<Role>("employee");
   const [page, setPage] = useState("home");
@@ -160,6 +156,7 @@ export default function App() {
   const [intro, setIntro] = useState(true);
   const [toast, setToast] = useState("");
   const [online, setOnline] = useState(navigator.onLine);
+  const [realtimeOnline, setRealtimeOnline] = useState(false);
 
   useEffect(() => {
     const onlineHandler = () => setOnline(true);
@@ -175,27 +172,78 @@ export default function App() {
     return () => window.clearTimeout(id);
   }, [toast]);
 
+  useEffect(() => {
+    if (!supabaseConfigured) return;
+    let mounted = true;
+    void loadLiveData()
+      .then(({ journeys: liveJourneys, incident: liveIncident }) => {
+        if (!mounted) return;
+        if (liveJourneys.length) {
+          setJourneys(liveJourneys);
+          const current = liveJourneys.find(item => item.id === demoJourney.id) ?? liveJourneys[0];
+          setJourney(current);
+        }
+        if (liveIncident) setIncident(liveIncident);
+      })
+      .catch(() => {
+        if (mounted) setToast("Live database unavailable. Showing local demo data.");
+      });
+
+    const channel = subscribeToLiveData(
+      (next, eventType) => {
+        if (!mounted || eventType === "DELETE") return;
+        setJourneys(prev => {
+          const exists = prev.some(item => item.id === next.id);
+          return exists ? prev.map(item => item.id === next.id ? next : item) : [next, ...prev];
+        });
+        if (next.id === demoJourney.id) setJourney(next);
+      },
+      (next, eventType) => {
+        if (!mounted || eventType === "DELETE") return;
+        setIncident(next);
+      },
+      () => { if (mounted) setToast("Live safety data synchronized."); },
+      status => {
+        if (!mounted) return;
+        setRealtimeOnline(status === "SUBSCRIBED");
+      },
+    );
+
+    return () => {
+      mounted = false;
+      void unsubscribe(channel);
+    };
+  }, []);
+
   const updateJourney = (action: "anomaly" | "checkin" | "sos" | "handoff") => {
     const updated = mutateJourney(journey, action);
     setJourney(updated);
     setJourneys(prev => prev.map(j => j.id === updated.id ? updated : j));
+    void saveJourney(updated).catch(() => setToast("Could not sync journey state. Local state retained."));
+
     if (action === "anomaly") {
       setIncident({ ...incident, status: "VERIFYING", severity: "alert", anomaly: "Unexpected stop + route deviation", time: "10:46 PM" });
       setToast("Anomaly detected. Adaptive check-in initiated.");
-      void recordEvent("journey.anomaly", { journey_id: journey.id, anomaly: "unexpected_stop_route_deviation" });
+      const nextIncident = { ...incident, journeyId: journey.id, status: "VERIFYING" as const, severity: "alert" as const, anomaly: "Unexpected stop + route deviation", time: "Now" };
+      setIncident(nextIncident);
+      void saveIncident(nextIncident).catch(() => setToast("Incident created locally, but sync failed."));
+      void recordEvent("journey.anomaly", { journey_id: journey.id, anomaly: "unexpected_stop_route_deviation" }).catch(() => undefined);
     }
     if (action === "checkin") {
       setToast("Safety confirmed. Monitoring continues.");
-      void recordEvent("journey.checkin", { journey_id: journey.id, response: "safe" });
+      void recordEvent("journey.checkin", { journey_id: journey.id, response: "safe" }).catch(() => undefined);
     }
     if (action === "sos") {
       setIncident({ ...incident, status: "VERIFYING", severity: "critical", anomaly: "Silent SOS activation", time: "10:47 PM" });
       setToast("Silent SOS sent to security.");
-      void recordEvent("journey.sos", { journey_id: journey.id, trigger: "demo_silent_sos" });
+      const nextIncident = { ...incident, journeyId: journey.id, status: "VERIFYING" as const, severity: "critical" as const, anomaly: "Silent SOS activation", time: "Now" };
+      setIncident(nextIncident);
+      void saveIncident(nextIncident).catch(() => setToast("SOS is visible locally, but incident sync failed."));
+      void recordEvent("journey.sos", { journey_id: journey.id, trigger: "demo_silent_sos" }).catch(() => undefined);
     }
     if (action === "handoff") {
       setToast(updated.handoff.workplace ? "Workplace entry verified. Journey completed." : "Drop verified. Workplace entry remains pending.");
-      void recordEvent("journey.handoff", { journey_id: journey.id, workplace_entry: updated.handoff.workplace });
+      void recordEvent("journey.handoff", { journey_id: journey.id, workplace_entry: updated.handoff.workplace }).catch(() => undefined);
     }
   };
 
@@ -212,9 +260,24 @@ export default function App() {
       return <Profile />;
     }
     if (page === "overview") return <CommandCenter journeys={journeys} incident={incident} onIncident={(action) => {
-      if (action === "verify") { setIncident({ ...incident, status: "VERIFYING" }); setToast("Human verification started. Officer actions are recorded."); void recordEvent("incident.verify", { incident_id: incident.id }); }
-      if (action === "dispatch") { setIncident({ ...incident, status: "ESCALATED", severity: "critical" }); setToast("Security dispatched. Escalation recorded."); void recordEvent("incident.dispatch", { incident_id: incident.id }); }
-      if (action === "resolve") { setIncident({ ...incident, status: "RESOLVED", severity: "normal" }); setToast("Incident resolved and timeline updated."); void recordEvent("incident.resolve", { incident_id: incident.id }); }
+      if (action === "verify") {
+        const next = { ...incident, status: "VERIFYING" as const };
+        setIncident(next); setToast("Human verification started. Officer actions are recorded.");
+        void saveIncident(next).catch(() => setToast("Verification is local only. Sync failed."));
+        void recordEvent("incident.verify", { incident_id: incident.id }).catch(() => undefined);
+      }
+      if (action === "dispatch") {
+        const next = { ...incident, status: "ESCALATED" as const, severity: "critical" as const };
+        setIncident(next); setToast("Security dispatched. Escalation recorded.");
+        void saveIncident(next).catch(() => setToast("Dispatch is local only. Sync failed."));
+        void recordEvent("incident.dispatch", { incident_id: incident.id }).catch(() => undefined);
+      }
+      if (action === "resolve") {
+        const next = { ...incident, status: "RESOLVED" as const, severity: "normal" as const };
+        setIncident(next); setToast("Incident resolved and timeline updated.");
+        void saveIncident(next).catch(() => setToast("Resolution is local only. Sync failed."));
+        void recordEvent("incident.resolve", { incident_id: incident.id }).catch(() => undefined);
+      }
     }} />;
     const titles: Record<string,string> = {live:"Live Journeys", alerts:"Alerts", "risk-admin":"Risk Map", incidents:"Incidents", transport:"Transport", analytics:"Analytics", settings:"Settings"};
     return <Supporting title={titles[page] ?? "Overview"} />;
@@ -227,9 +290,9 @@ export default function App() {
 
   const employee = role === "employee";
   return <div className={employee ? "app-shell employee-shell" : "app-shell enterprise-shell"}>
-    {employee ? <div className="mobile-brand"><div><strong>NIRBHAY</strong><span>Safety Intelligence</span></div><span className="live-dot">{online ? "● Live" : "● Offline"}</span></div> : <SideNav active={page} onNavigate={go}/>}
+    {employee ? <div className="mobile-brand"><div><strong>NIRBHAY</strong><span>Safety Intelligence</span></div><span className="live-dot">{realtimeOnline ? "● Live" : online ? "● Syncing" : "● Offline"}</span></div> : <SideNav active={page} onNavigate={go}/>}
     <main className="main-content">
-      <header className="topbar"><div className="role-switcher"><span>Viewing as</span>{(["employee","security","admin"] as Role[]).map(r=><button key={r} onClick={()=>switchRole(r)} className={role===r?"active":""}>{r}</button>)}</div><div className="connection"><span className={supabaseConfigured ? "conn-dot on" : "conn-dot"}/>{supabaseConfigured ? "Supabase connected" : "Demo mode"} · {online ? "Online" : "Offline"}</div></header>
+      <header className="topbar"><div className="role-switcher"><span>Viewing as</span>{(["employee","security","admin"] as Role[]).map(r=><button key={r} onClick={()=>switchRole(r)} className={role===r?"active":""}>{r}</button>)}</div><div className="connection"><span className={(supabaseConfigured && realtimeOnline) ? "conn-dot on" : "conn-dot"}/>{supabaseConfigured ? (realtimeOnline ? "Realtime live" : "Supabase syncing") : "Demo mode"} · {online ? "Online" : "Offline"}</div></header>
       {!online && <div className="offline-banner"><strong>Low Connectivity</strong><span>Local journey state and demo workflows remain available. Real-time network actions are limited.</span></div>}
       {content}
     </main>
